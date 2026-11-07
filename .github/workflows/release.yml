@@ -1,0 +1,126 @@
+# Construit Blue Edit pour Windows, Linux et macOS.
+# Pousser un tag « vX.Y.Z » (égal à la version de Cargo.toml) publie une release GitHub avec :
+#   BlueEdit-X.Y.Z-Setup.exe                  installateur Windows (ffmpeg inclus)
+#   BlueEdit-X.Y.Z-windows-portable.exe       Windows portable (ffmpeg à installer à part)
+#   BlueEdit-X.Y.Z-x86_64.AppImage            Linux, toutes distributions
+#   blue-edit_X.Y.Z_amd64.deb                 Debian / Ubuntu
+#   blue-edit-X.Y.Z-linux-x86_64.tar.gz       Linux, archive avec install.sh
+#   BlueEdit-X.Y.Z-macos-universal.dmg        macOS (Apple Silicon et Intel)
+# Lancé à la main (Actions > Release > Run workflow), il construit tout sans publier.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vérifier que le tag correspond à la version du code
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME invalide : attendu vX.Y.Z"
+            exit 1
+          fi
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Le tag $GITHUB_REF_NAME ne correspond pas à version = $version (Cargo.toml)"
+            exit 1
+          fi
+
+  windows:
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        shell: pwsh
+        run: cargo test --release --locked
+      - name: Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+      - name: Portable et installateur
+        shell: pwsh
+        run: ./packaging/build-windows.ps1 -WithFfmpeg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/windows/BlueEdit-*-Setup.exe
+            dist/windows/BlueEdit-*-windows-portable.exe
+          if-no-files-found: error
+
+  linux:
+    needs: check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bibliothèques système
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libgtk-3-dev libxkbcommon-dev libgl1-mesa-dev libwayland-dev
+      - name: appimagetool
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+      - name: AppImage, .deb et .tar.gz
+        env:
+          APPIMAGETOOL: ${{ runner.temp }}/appimagetool
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: bash packaging/build-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/linux/*.AppImage
+            dist/linux/*.deb
+            dist/linux/*.tar.gz
+          if-no-files-found: error
+
+  macos:
+    needs: check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Application universelle et .dmg
+        run: bash packaging/build-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/macos/*.dmg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Créer la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la packages
+          if [ -f "docs/release-$GITHUB_REF_NAME.md" ]; then notes=(--notes-file "docs/release-$GITHUB_REF_NAME.md"); else notes=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" packages/* --title "Blue Edit $GITHUB_REF_NAME" "${notes[@]}" --verify-tag

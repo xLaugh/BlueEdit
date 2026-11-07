@@ -1,0 +1,16 @@
+# Construction
+/target/
+/dist/
+
+# Réglage local de ce PC (compilateur rustup forcé) : pas pour les autres machines
+/.cargo/
+
+# Notes de travail et captures générées pendant le développement
+/MECHANICS.md
+/mechanics.json
+/MANQUES_PAR_RAPPORT_A_VEGAS.md
+/screenshot.png
+/shots/
+
+.DS_Store
+Thumbs.db
