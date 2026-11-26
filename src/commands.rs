@@ -13,11 +13,24 @@ impl App {
         if ctx.wants_keyboard_input() || self.key_edit.is_some() {
             return;
         }
+        // egui turns Ctrl+C / Ctrl+X / Ctrl+V (and Ctrl+Inser, Maj+Suppr,
+        // Maj+Inser) into Copy / Cut / Paste events instead of key presses:
+        // map them back to their keys so they go through the key map too.
         let keys: Vec<(Key, egui::Modifiers)> = ctx.input(|i| {
+            let clip = |k: Key| {
+                let mut m = i.modifiers;
+                m.command = true;
+                m.ctrl = !cfg!(target_os = "macos");
+                m.mac_cmd = cfg!(target_os = "macos");
+                Some((k, m))
+            };
             i.events
                 .iter()
                 .filter_map(|e| match e {
                     egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                    egui::Event::Copy => clip(Key::C),
+                    egui::Event::Cut => clip(Key::X),
+                    egui::Event::Paste(_) => clip(Key::V),
                     _ => None,
                 })
                 .collect()
@@ -105,7 +118,7 @@ impl App {
             "render" => self.open_render_dialog(),
             "render_new_track" => self.render_to_new_track(),
             "split" => self.split_at_cursor(),
-            "delete" => self.delete_selected(),
+            "delete" => self.delete_tracks_or_events(),
             "undo" => self.do_undo(),
             "redo" => self.do_redo(),
             "copy" => self.copy_selected(),

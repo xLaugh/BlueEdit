@@ -171,7 +171,7 @@ impl App {
         if self.prefs.show_envelopes {
             self.draw_envelopes(&p, g, ys);
         }
-        if let (Some(Drag::RectSel { from } | Drag::ZoomRect { from }), Some(pp)) = (self.drag.clone(), resp.interact_pointer_pos()) {
+        if let (Some(Drag::RectSel { from } | Drag::ZoomRect { from } | Drag::Marquee { from, .. }), Some(pp)) = (self.drag.clone(), resp.interact_pointer_pos()) {
             p.rect_stroke(Rect::from_two_pos(from, pp), 0.0, Stroke::new(1.0, theme::ACCENT()), StrokeKind::Inside);
             p.rect_filled(Rect::from_two_pos(from, pp), 0.0, theme::ACCENT().gamma_multiply(0.12));
         }
@@ -204,6 +204,7 @@ impl App {
             }
         }
         if resp.clicked() {
+            self.last_click_tracks = false;
             if let Some(pp) = resp.interact_pointer_pos() {
                 match self.event_zone(g, ys, pp) {
                     Some((ti, ei, z)) => {
@@ -225,13 +226,26 @@ impl App {
                         }
                     }
                     None => {
-                        if !ctrl {
+                        let shift = ui.input(|i| i.modifiers.shift);
+                        if !ctrl && !shift {
                             self.sel.clear();
                         }
                         if let Some(ti) = self.track_at_y(ys, pp.y) {
                             self.focus_track = ti;
                         }
-                        self.cursor = self.click_time(g.t(pp.x));
+                        let t = self.click_time(g.t(pp.x));
+                        if shift {
+                            // extend the time selection from the cursor (or its far edge)
+                            let anchor = match self.p.loop_region {
+                                Some((a, b)) if (t - a).abs() > (t - b).abs() => a,
+                                Some((_, b)) => b,
+                                None => self.cursor,
+                            };
+                            if (t - anchor).abs() > 1e-9 {
+                                self.p.loop_region = Some((anchor.min(t), anchor.max(t)));
+                            }
+                        }
+                        self.cursor = t;
                     }
                 }
             }
@@ -310,8 +324,24 @@ impl App {
 
     fn event_menu(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.tl.ctx_event else {
-            if ui.add_enabled(!self.clipboard.is_empty(), egui::Button::new(tr("Coller")).shortcut_text(crate::platform::shortcut(tr("Ctrl+V")))).clicked() {
+            let has_sel = !self.sel.is_empty();
+            if ui.add_enabled(has_sel, egui::Button::new(tr("Couper")).shortcut_text(crate::platform::shortcut(tr("Ctrl+X")))).clicked() {
+                self.cut_selected();
+                ui.close_menu();
+            }
+            if ui.add_enabled(has_sel, egui::Button::new(tr("Copier")).shortcut_text(crate::platform::shortcut(tr("Ctrl+C")))).clicked() {
+                self.copy_selected();
+                ui.close_menu();
+            }
+            if ui.add_enabled(has_sel, egui::Button::new(tr("Supprimer")).shortcut_text(crate::platform::shortcut(tr("Suppr")))).clicked() {
+                self.delete_selected();
+                ui.close_menu();
+            }
+            if ui.add_enabled(self.can_paste(), egui::Button::new(tr("Coller")).shortcut_text(crate::platform::shortcut(tr("Ctrl+V")))).clicked() {
                 self.cursor = self.click_time(self.tl.ctx_time);
+                if let Some(ti) = self.tl.ctx_track {
+                    self.focus_track = ti;
+                }
                 self.paste();
                 ui.close_menu();
             }
@@ -458,11 +488,13 @@ impl App {
             if !ctrl {
                 self.sel.clear();
             }
+            self.last_click_tracks = false;
             let t = self.click_time(t);
-            self.drag = Some(Drag::LoopNew { from: t });
+            self.drag = Some(Drag::Marquee { from_t: t, from: o, base: self.sel.clone() });
             self.cursor = t;
             return;
         };
+        self.last_click_tracks = false;
         let id = self.p.tracks[ti].events[ei].id;
         if !self.sel.contains(&id) {
             self.select_event(id, ctrl);
@@ -656,6 +688,22 @@ impl App {
                 let t = self.snap_time(t.max(0.0), &HashSet::new());
                 if (t - from).abs() * g.pps > 3.0 {
                     self.p.loop_region = Some((from.min(t), from.max(t)));
+                }
+            }
+            Some(Drag::Marquee { from_t, from, base }) => {
+                let ts = self.snap_time(t.max(0.0), &HashSet::new());
+                if (pp - from).length() > 3.0 {
+                    if (ts - from_t).abs() * g.pps > 3.0 {
+                        self.p.loop_region = Some((from_t.min(ts), from_t.max(ts)));
+                    }
+                    // events touched by the rectangle (time range x track range)
+                    let last = self.p.tracks.len().saturating_sub(1);
+                    let tr0 = self.track_at_y(ys, from.y).unwrap_or(if from.y < g.tracks_top { 0 } else { last });
+                    let tr1 = self.track_at_y(ys, pp.y).unwrap_or(if pp.y < g.tracks_top { 0 } else { last });
+                    self.sel = base;
+                    if !self.p.tracks.is_empty() {
+                        self.select_rect(g.t(from.x).max(0.0), t.max(0.0), tr0, tr1, true);
+                    }
                 }
             }
             Some(other) => self.update_drag_tool(other, g, ys, pp),

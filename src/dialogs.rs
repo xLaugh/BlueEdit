@@ -74,6 +74,9 @@ impl App {
                 ui.label(tr("Couper/copier les événements groupés"));
                 save |= ui.checkbox(&mut p.clipboard_on_groups, "").changed();
                 ui.end_row();
+                ui.label(tr("Vider le presse-papiers à la fermeture du projet"));
+                save |= ui.checkbox(&mut p.empty_clipboard_on_close, "").changed();
+                ui.end_row();
                 ui.label(tr("Afficher les enveloppes"));
                 save |= ui.checkbox(&mut p.show_envelopes, "").changed();
                 ui.end_row();

@@ -234,6 +234,16 @@ pub struct App {
     pub last_autosave: Instant,
     pub automation_writes: Vec<(usize, bool, f32)>,
     pub sel_rect: Option<(egui::Pos2, egui::Pos2)>,
+    /// Text Blue Edit last put on the system clipboard (to know if it still owns it).
+    pub clip_note: Option<String>,
+    /// Kind of each track at copy time (index = track of the copied event).
+    pub clip_kinds: Vec<Option<TrackKind>>,
+    /// Tracks selected by clicking their number (indices).
+    pub sel_tracks: HashSet<usize>,
+    /// Shift+click range start for track selection.
+    pub track_anchor: usize,
+    /// The last selection click was on track numbers (Delete removes tracks).
+    pub last_click_tracks: bool,
 }
 
 /// Toolbar buttons that can be hidden (Options > Personnaliser la barre d'outils).
@@ -401,6 +411,11 @@ impl App {
             last_autosave: Instant::now(),
             automation_writes: vec![],
             sel_rect: None,
+            clip_note: None,
+            clip_kinds: vec![],
+            sel_tracks: HashSet::new(),
+            track_anchor: 0,
+            last_click_tracks: false,
         };
         // BLUE_LAYOUT=n loads a preset layout at start (used to check them).
         if let Some(n) = std::env::var("BLUE_LAYOUT").ok().and_then(|s| s.parse::<usize>().ok()) {
@@ -497,6 +512,30 @@ impl App {
         }
     }
 
+    /// Delete key: the selected tracks when the last click selected tracks,
+    /// otherwise the selected events. One undo step either way.
+    pub fn delete_tracks_or_events(&mut self) {
+        if self.last_click_tracks && !self.sel_tracks.is_empty() {
+            self.push_undo();
+            let mut v: Vec<usize> = self.sel_tracks.iter().copied().filter(|t| *t < self.p.tracks.len()).collect();
+            v.sort_unstable_by(|a, b| b.cmp(a));
+            let n = v.len();
+            for ti in v {
+                let removed = self.p.tracks.remove(ti);
+                for e in &removed.events {
+                    self.sel.remove(&e.id);
+                }
+            }
+            self.sel_tracks.clear();
+            self.last_click_tracks = false;
+            self.focus_track = self.focus_track.min(self.p.tracks.len().saturating_sub(1));
+            self.status = format!("{} {}", n, tr("piste(s) supprimée(s) (Ctrl+Z pour les remettre)."));
+            self.label_last_undo(tr("Supprimer des pistes"));
+        } else {
+            self.delete_selected();
+        }
+    }
+
     pub fn delete_selected(&mut self) {
         if self.sel.is_empty() {
             return;
@@ -587,7 +626,13 @@ impl App {
             e.start -= min_start;
         }
         if !items.is_empty() {
+            self.clip_kinds = self.p.tracks.iter().map(|t| Some(t.kind)).collect();
             self.status = format!("{} événement(s) copié(s).", items.len());
+            // egui only sends Ctrl+V when the system clipboard holds text:
+            // put a short note there so pasting works right after copying.
+            let note = format!("Blue Edit : {} événement(s)", items.len());
+            self.ctx.copy_text(note.clone());
+            self.clip_note = Some(note);
             self.clipboard = items;
         }
     }
@@ -597,8 +642,39 @@ impl App {
         self.delete_selected();
     }
 
+    /// Tracks the copied events go to. The clipboard keeps the first track and
+    /// the number of tracks of the copy: the first copied track lands on the focused track and the others
+    /// keep their distance below it; an event only goes to a track of its own
+    /// kind (otherwise the next one of that kind, else its original track).
+    pub fn paste_targets(&self) -> Vec<(usize, Event)> {
+        let kinds: Vec<TrackKind> = self.p.tracks.iter().map(|t| t.kind).collect();
+        let tis: Vec<usize> = self.clipboard.iter().map(|(t, _)| *t).collect();
+        paste_tracks(&tis, &self.clip_kinds, &kinds, self.focus_track)
+            .into_iter()
+            .zip(self.clipboard.iter())
+            .map(|(t, (_, e))| (t, e.clone()))
+            .collect()
+    }
+
+    /// Paste is possible when the focused track's kind is among the copied
+    /// events' kinds (video and audio tracks counted against the clipboard's
+    /// video/audio counts).
+    pub fn can_paste(&self) -> bool {
+        if self.clipboard.is_empty() {
+            return false;
+        }
+        match self.p.tracks.get(self.focus_track).map(|t| t.kind) {
+            Some(k) => self.clipboard.iter().any(|(ti, _)| self.clip_kinds.get(*ti).copied().flatten() == Some(k)),
+            None => true,
+        }
+    }
+
     pub fn paste(&mut self) {
         if self.clipboard.is_empty() {
+            return;
+        }
+        if !self.can_paste() {
+            self.status = tr("Rien à coller sur ce type de piste : choisissez une piste du même type que les événements copiés.").into();
             return;
         }
         self.push_undo();
@@ -610,7 +686,7 @@ impl App {
             .map(|(_, e)| e.end())
             .fold(0.0, f64::max);
         let mut groups: HashMap<Id, Id> = HashMap::new();
-        let items = self.clipboard.clone();
+        let items = self.paste_targets();
         for (ti, mut e) in items {
             if ti >= self.p.tracks.len() {
                 continue;
@@ -768,7 +844,26 @@ impl App {
         id
     }
 
+    /// Project closing (new / open): empties the clipboard
+    /// when the preference empty_clipboard_on_close (default on) is set.
+    pub fn close_project_clipboard(&mut self) {
+        if self.prefs.empty_clipboard_on_close && !self.clipboard.is_empty() {
+            self.clipboard.clear();
+            // the system
+            // clipboard is emptied only if it still holds what Blue Edit put
+            // there: text copied since in another program is left alone
+            if let Some(note) = self.clip_note.take() {
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    if cb.get_text().map(|t| t == note).unwrap_or(false) {
+                        let _ = cb.clear();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn new_project(&mut self) {
+        self.close_project_clipboard();
         self.push_undo();
         let mut p = Project::empty();
         p.add_track(TrackKind::Video, None);
@@ -1184,6 +1279,30 @@ fn dirs_home() -> Option<PathBuf> {
     crate::platform::home()
 }
 
+/// Destination track of each copied event (see App::paste_targets):
+/// `tis` = tracks at copy time, `clip_kinds` = their kinds at copy time,
+/// `kinds` = current track kinds, `focus` = focused track.
+pub fn paste_tracks(tis: &[usize], clip_kinds: &[Option<TrackKind>], kinds: &[TrackKind], focus: usize) -> Vec<usize> {
+    let n = kinds.len();
+    let min_ti = tis.iter().copied().min().unwrap_or(0);
+    let first_kind = clip_kinds.get(min_ti).copied().flatten();
+    let anchor = if first_kind.is_some() && kinds.get(focus).copied() == first_kind { focus } else { min_ti };
+    tis.iter()
+        .map(|ti| {
+            let want = clip_kinds.get(*ti).copied().flatten();
+            let target = anchor + (ti - min_ti);
+            let ok = |t: usize| t < n && (want.is_none() || Some(kinds[t]) == want);
+            if ok(target) {
+                target
+            } else if let Some(t) = (target.min(n)..n).find(|t| ok(*t)) {
+                t
+            } else {
+                *ti
+            }
+        })
+        .collect()
+}
+
 pub fn default_text() -> Generator {
     Generator::Text {
         text: "Texte d'exemple".into(),
@@ -1312,6 +1431,20 @@ mod tests {
         let v = crate::platform::version_folder();
         assert_eq!(window_title("Film.blue", true), format!("Film.blue * - Blue Edit {v}"));
         assert_eq!(window_title("Film.blue", false), format!("Film.blue - Blue Edit {v}"));
+    }
+    #[test]
+    fn paste_goes_to_focused_track() {
+        use TrackKind::{Audio as A, Video as V};
+        let kinds = [V, V, A, A];
+        let ck = vec![Some(V), Some(V), Some(A), Some(A)];
+        // a video event copied from track 1, focus on track 0 -> track 0
+        assert_eq!(paste_tracks(&[1], &ck, &kinds, 0), vec![0]);
+        // grouped video (1) + audio (2), focus on 0 -> 0 and 1 is video, so audio goes to the next audio track (2)
+        assert_eq!(paste_tracks(&[1, 2], &ck, &kinds, 0), vec![0, 2]);
+        // focus on an audio track while the first copied track is video -> original tracks
+        assert_eq!(paste_tracks(&[1], &ck, &kinds, 3), vec![1]);
+        // audio from track 2, focus on audio track 3 -> 3
+        assert_eq!(paste_tracks(&[2], &ck, &kinds, 3), vec![3]);
     }
     #[test]
     fn extension_added_once() {

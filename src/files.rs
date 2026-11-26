@@ -36,6 +36,7 @@ impl App {
             .and_then(|s| serde_json::from_str::<Project>(&s).map_err(|e| e.to_string()))
         {
             Ok(p) => {
+                self.close_project_clipboard();
                 self.push_undo();
                 self.p = p;
                 for m in &self.p.media {

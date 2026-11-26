@@ -26,6 +26,8 @@ pub struct Prefs {
     pub use_proxies: bool,
     /// fOperateClipboardOnGroups = 1
     pub clipboard_on_groups: bool,
+    /// fEmptyClipboardOnProjectClose = 1
+    pub empty_clipboard_on_close: bool,
     /// fRecordAsBroadcastWave = 1
     pub record_bwf: bool,
     /// Record folder (szRecordPath); empty = project folder or Videos.
@@ -55,6 +57,7 @@ impl Default for Prefs {
             metronome_count_in: 2,
             use_proxies: false,
             clipboard_on_groups: true,
+            empty_clipboard_on_close: true,
             record_bwf: true,
             record_dir: String::new(),
             show_envelopes: true,

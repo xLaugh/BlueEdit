@@ -112,6 +112,13 @@ pub enum Drag {
     HScroll {
         grab: f64,
     },
+    /// Drag in the empty part of the timeline (normal tool): a rectangle
+    /// selecting the events it touches, plus a time selection.
+    Marquee {
+        from_t: f64,
+        from: Pos2,
+        base: HashSet<Id>,
+    },
     /// Selection tool rectangle (screen positions).
     RectSel {
         from: Pos2,
@@ -686,6 +693,37 @@ impl App {
             if body.clicked() || name_resp.clicked() {
                 self.focus_track = ti;
             }
+            // track number: select tracks (Ctrl+click toggles, Shift+click extends)
+            let num = ui.interact(strip, ui.id().with(("num", ti)), Sense::click());
+            if num.clicked() {
+                let m = ui.input(|i| i.modifiers);
+                if m.shift {
+                    let a = self.track_anchor.min(self.p.tracks.len().saturating_sub(1));
+                    if !m.command {
+                        self.sel_tracks.clear();
+                    }
+                    for k in a.min(ti)..=a.max(ti) {
+                        self.sel_tracks.insert(k);
+                    }
+                } else if m.command {
+                    if !self.sel_tracks.remove(&ti) {
+                        self.sel_tracks.insert(ti);
+                    }
+                    self.track_anchor = ti;
+                } else {
+                    self.sel_tracks.clear();
+                    self.sel_tracks.insert(ti);
+                    self.track_anchor = ti;
+                }
+                self.focus_track = ti;
+                self.last_click_tracks = true;
+                self.status = format!("{} {}", self.sel_tracks.len(), tr("piste(s) sélectionnée(s) : Suppr pour les supprimer."));
+            }
+            let num = num.on_hover_text(tr("Cliquer : sélectionner la piste. Ctrl+clic : en ajouter. Maj+clic : une plage. Suppr : supprimer les pistes sélectionnées."));
+            if self.sel_tracks.contains(&ti) {
+                hp.rect_stroke(r, 0.0, Stroke::new(2.0, theme::ACCENT()), StrokeKind::Inside);
+                hp.rect_filled(strip, 0.0, theme::ACCENT().gamma_multiply(0.5));
+            }
             // badges: armed, adjustment, child, blend, group
             {
                 let t = &self.p.tracks[ti];
@@ -714,7 +752,7 @@ impl App {
                     badge("▤", theme::TEXT_DIM());
                 }
             }
-            let menu_resp = name_resp.union(body);
+            let menu_resp = name_resp.union(body).union(num);
             menu_resp.context_menu(|ui| {
                 for (label, key) in [
                     (tr("Renommer"), "rename"),
@@ -736,8 +774,39 @@ impl App {
                 }
             });
         }
+        // empty part of the header column under the last track
+        let last_bottom = ys.last().map(|(y, h)| y + h).unwrap_or(area.top()).max(area.top());
+        if last_bottom < area.bottom() - 2.0 {
+            let empty = Rect::from_min_max(pos2(area.left(), last_bottom), pos2(area.left() + HEADER_W - 1.0, area.bottom()));
+            let er = ui.interact(empty, ui.id().with("hdr_empty"), Sense::click());
+            if er.clicked() {
+                self.sel_tracks.clear();
+            }
+            let n = self.p.tracks.len();
+            er.context_menu(|ui| {
+                if ui.button(tr("Insérer une piste vidéo")).clicked() {
+                    action = Some((n, "addv_end"));
+                    ui.close_menu();
+                }
+                if ui.button(tr("Insérer une piste audio")).clicked() {
+                    action = Some((n, "adda_end"));
+                    ui.close_menu();
+                }
+            });
+        }
         if let Some((ti, a)) = action {
             match a {
+                "addv_end" => {
+                    self.push_undo();
+                    // video tracks go above the audio tracks
+                    let at = self.p.tracks.iter().position(|t| t.kind == TrackKind::Audio);
+                    self.focus_track = self.p.add_track(TrackKind::Video, at);
+                    let _ = ti;
+                }
+                "adda_end" => {
+                    self.push_undo();
+                    self.focus_track = self.p.add_track(TrackKind::Audio, None);
+                }
                 "rename" => {
                     self.rename_track = Some(ti);
                     self.tl.rename_buf = self.p.tracks[ti].name.clone();
@@ -764,6 +833,7 @@ impl App {
                 "del" => {
                     self.push_undo();
                     self.p.tracks.remove(ti);
+                    self.sel_tracks.clear();
                     self.focus_track = self.focus_track.min(self.p.tracks.len().saturating_sub(1));
                 }
                 _ => {}
